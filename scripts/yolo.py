@@ -15,40 +15,45 @@ from PIL import Image, ImageFont, ImageDraw
 
 from model import *
 from utils import *
-import os
 
-# must be added for inference and commented for training
+# Eager execution is disabled so the TF1-style graph code below (K.get_session,
+# K.placeholder, sess.run) keeps working under TensorFlow 2.
 from tensorflow.python.framework.ops import disable_eager_execution
 disable_eager_execution()
 
 
 class YOLO(object):
+    """YOLO_v3 style detection model for inference on images and video."""
+
     _defaults = {
         "model_path": '../input/model-data/model_data/yolo.h5',
         "anchors_path": '../input/model-data/model_data/yolo_anchors.txt',
         "classes_path": '../input/model-data/model_data/coco_classes.txt',
-        "score" : 0.3,
-        "iou" : 0.45,
-        "model_image_size" : (128, 128),
-        "gpu_num" : 0,
+        "score": 0.3,
+        "iou": 0.45,
+        "model_image_size": (128, 128),
+        "gpu_num": 0,
     }
 
     @classmethod
     def get_defaults(cls, n):
+        """Return the default value for a YOLO attribute name."""
         if n in cls._defaults:
             return cls._defaults[n]
         else:
             return "Unrecognized attribute name '" + n + "'"
 
     def __init__(self, **kwargs):
-        self.__dict__.update(self._defaults) # set up default values
-        self.__dict__.update(kwargs) # and update with user overrides
+        """Create the model, load weights/anchors/classes, and build the eval graph."""
+        self.__dict__.update(self._defaults)  # set up default values
+        self.__dict__.update(kwargs)  # and update with user overrides
         self.class_names = self._get_class()
         self.anchors = self._get_anchors()
         self.sess = K.get_session()
         self.boxes, self.scores, self.classes = self.generate()
 
     def _get_class(self):
+        """Read the class names file into a list."""
         classes_path = os.path.expanduser(self.classes_path)
         with open(classes_path) as f:
             class_names = f.readlines()
@@ -56,6 +61,7 @@ class YOLO(object):
         return class_names
 
     def _get_anchors(self):
+        """Read the anchors file into a (N, 2) numpy array."""
         anchors_path = os.path.expanduser(self.anchors_path)
         with open(anchors_path) as f:
             anchors = f.readline()
@@ -63,22 +69,23 @@ class YOLO(object):
         return np.array(anchors).reshape(-1, 2)
 
     def generate(self):
+        """Load the model (or build it and load weights) and create the eval tensors."""
         model_path = os.path.expanduser(self.model_path)
         assert model_path.endswith('.h5'), 'Keras model or weights must be a .h5 file.'
 
         # Load model, or construct model and load weights.
         num_anchors = len(self.anchors)
         num_classes = len(self.class_names)
-        is_tiny_version = num_anchors==6 # default setting
+        is_tiny_version = num_anchors == 6  # default setting
         try:
             self.yolo_model = load_model(model_path, compile=False)
         except:
-            self.yolo_model = tiny_yolo_body(Input(shape=(None,None,3)), num_anchors//2, num_classes) \
-                if is_tiny_version else yolo_body(Input(shape=(None,None,3)), num_anchors//3, num_classes)
-            self.yolo_model.load_weights(self.model_path) # make sure model, anchors and classes match
+            self.yolo_model = tiny_yolo_body(Input(shape=(None, None, 3)), num_anchors // 2, num_classes) \
+                if is_tiny_version else yolo_body(Input(shape=(None, None, 3)), num_anchors // 3, num_classes)
+            self.yolo_model.load_weights(self.model_path)  # make sure model, anchors and classes match
         else:
             assert self.yolo_model.layers[-1].output_shape[-1] == \
-                num_anchors/len(self.yolo_model.output) * (num_classes + 5), \
+                num_anchors / len(self.yolo_model.output) * (num_classes + 5), \
                 'Mismatch between model and given anchor and class sizes'
 
         print('{} model, anchors, and classes loaded.'.format(model_path))
@@ -105,10 +112,20 @@ class YOLO(object):
         return boxes, scores, classes
 
     def detect_image(self, image):
+        """Run detection on one PIL image, draw the boxes, and return results.
 
+        Returns
+        -------
+        image : PIL.Image
+            The input image with bounding boxes and labels drawn on it.
+        out_boxes : ndarray
+            Detected boxes as (y_min, x_min, y_max, x_max).
+        labels : list of str
+            "<class> <score>" labels, one per box.
+        """
         if self.model_image_size != (None, None):
-            assert self.model_image_size[0]%32 == 0, 'Multiples of 32 required'
-            assert self.model_image_size[1]%32 == 0, 'Multiples of 32 required'
+            assert self.model_image_size[0] % 32 == 0, 'Multiples of 32 required'
+            assert self.model_image_size[1] % 32 == 0, 'Multiples of 32 required'
             boxed_image = letterbox_image(image, tuple(reversed(self.model_image_size)))
         else:
             new_image_size = (image.width - (image.width % 32),
@@ -127,9 +144,8 @@ class YOLO(object):
                 K.learning_phase(): 0
             })
 
-
         font = ImageFont.truetype(font='../input/font-data/font/FiraMono-Medium.otf',
-                    size=np.floor(3e-2 * image.size[1] + 0.5).astype('int32'))
+                                  size=np.floor(3e-2 * image.size[1] + 0.5).astype('int32'))
         thickness = (image.size[0] + image.size[1]) // 300
         labels = []
         for i, c in reversed(list(enumerate(out_classes))):
@@ -140,7 +156,9 @@ class YOLO(object):
             label = '{} {:.2f}'.format(predicted_class, score)
             labels.append(label)
             draw = ImageDraw.Draw(image)
-            label_size = draw.textsize(label, font)
+            # textbbox works on Pillow >= 8.0 (textsize was removed in Pillow 10)
+            bbox = draw.textbbox((0, 0), label, font=font)
+            label_size = (bbox[2] - bbox[0], bbox[3] - bbox[1])
 
             top, left, bottom, right = box
             top = max(0, np.floor(top + 0.5).astype('int32'))
@@ -164,12 +182,27 @@ class YOLO(object):
             draw.text(text_origin, label, fill=(0, 0, 0), font=font)
             del draw
 
-        return image , out_boxes, labels
+        return image, out_boxes, labels
 
     def close_session(self):
+        """Close the TensorFlow session used for inference."""
         self.sess.close()
 
+
 def detect_video(yolo, video_path, output_path=""):
+    """Run paw detection on every frame of a video, showing and optionally saving it.
+
+    Parameters
+    ----------
+    yolo : YOLO
+        Initialized YOLO inference object.
+    video_path : str
+        Path to the input video.
+    output_path : str
+        When non-empty, the annotated video is written to this path.
+
+    Press 'q' to stop the preview early.
+    """
     import cv2
     vid = cv2.VideoCapture(video_path)
     if not vid.isOpened():
@@ -180,7 +213,6 @@ def detect_video(yolo, video_path, output_path=""):
                         int(vid.get(cv2.CAP_PROP_FRAME_HEIGHT)))
     isOutput = True if output_path != "" else False
     if isOutput:
-        print("!!! TYPE:", type(output_path), type(video_FourCC), type(video_fps), type(video_size))
         out = cv2.VideoWriter(output_path, video_FourCC, video_fps, video_size)
     accum_time = 0
     curr_fps = 0

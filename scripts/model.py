@@ -1,13 +1,15 @@
-# %% [code] {"jupyter":{"outputs_hidden":false}}
-"""YOLO_v3 Model Defined in Keras."""
+"""YOLO_v3 model defined in Keras.
+
+Adapted from https://github.com/qqwweee/keras-yolo3 for mouse paw detection.
+"""
 
 from functools import wraps
 
 import numpy as np
 import tensorflow as tf
 from keras import backend as K
-from keras.layers import Conv2D, Add, ZeroPadding2D, UpSampling2D, Concatenate, MaxPooling2D
-from keras.layers.advanced_activations import LeakyReLU
+from keras.layers import (Conv2D, Add, ZeroPadding2D, UpSampling2D,
+                          Concatenate, MaxPooling2D, LeakyReLU)
 from keras.layers import BatchNormalization
 from keras.models import Model
 from keras.regularizers import l2
@@ -17,9 +19,9 @@ from utils import *
 
 @wraps(Conv2D)
 def DarknetConv2D(*args, **kwargs):
-    """Wrapper to set Darknet parameters for Convolution2D."""
+    """Convolution2D with Darknet defaults (L2 regularization, same/valid padding)."""
     darknet_conv_kwargs = {'kernel_regularizer': l2(5e-4)}
-    darknet_conv_kwargs['padding'] = 'valid' if kwargs.get('strides')==(2,2) else 'same'
+    darknet_conv_kwargs['padding'] = 'valid' if kwargs.get('strides') == (2, 2) else 'same'
     darknet_conv_kwargs.update(kwargs)
     return Conv2D(*args, **darknet_conv_kwargs)
 
@@ -33,20 +35,20 @@ def DarknetConv2D_BN_Leaky(*args, **kwargs):
         LeakyReLU(alpha=0.1))
 
 def resblock_body(x, num_filters, num_blocks):
-    '''A series of resblocks starting with a downsampling Convolution2D'''
+    """A series of residual blocks starting with a downsampling Convolution2D."""
     # Darknet uses left and top padding instead of 'same' mode
-    x = ZeroPadding2D(((1,0),(1,0)))(x)
-    x = DarknetConv2D_BN_Leaky(num_filters, (3,3), strides=(2,2))(x)
+    x = ZeroPadding2D(((1, 0), (1, 0)))(x)
+    x = DarknetConv2D_BN_Leaky(num_filters, (3, 3), strides=(2, 2))(x)
     for i in range(num_blocks):
         y = compose(
-                DarknetConv2D_BN_Leaky(num_filters//2, (1,1)),
-                DarknetConv2D_BN_Leaky(num_filters, (3,3)))(x)
-        x = Add()([x,y])
+                DarknetConv2D_BN_Leaky(num_filters // 2, (1, 1)),
+                DarknetConv2D_BN_Leaky(num_filters, (3, 3)))(x)
+        x = Add()([x, y])
     return x
 
 def darknet_body(x):
-    '''Darknent body having 52 Convolution2D layers'''
-    x = DarknetConv2D_BN_Leaky(32, (3,3))(x)
+    """Darknet-53 body with 52 Convolution2D layers."""
+    x = DarknetConv2D_BN_Leaky(32, (3, 3))(x)
     x = resblock_body(x, 64, 1)
     x = resblock_body(x, 128, 2)
     x = resblock_body(x, 256, 8)
@@ -55,16 +57,20 @@ def darknet_body(x):
     return x
 
 def make_last_layers(x, num_filters, out_filters):
-    '''6 Conv2D_BN_Leaky layers followed by a Conv2D_linear layer'''
+    """Six Conv2D_BN_Leaky layers followed by a linear Conv2D output layer.
+
+    Returns the feature map before the last layer (used for upsampling) and
+    the final detection output.
+    """
     x = compose(
-            DarknetConv2D_BN_Leaky(num_filters, (1,1)),
-            DarknetConv2D_BN_Leaky(num_filters*2, (3,3)),
-            DarknetConv2D_BN_Leaky(num_filters, (1,1)),
-            DarknetConv2D_BN_Leaky(num_filters*2, (3,3)),
-            DarknetConv2D_BN_Leaky(num_filters, (1,1)))(x)
+            DarknetConv2D_BN_Leaky(num_filters, (1, 1)),
+            DarknetConv2D_BN_Leaky(num_filters * 2, (3, 3)),
+            DarknetConv2D_BN_Leaky(num_filters, (1, 1)),
+            DarknetConv2D_BN_Leaky(num_filters * 2, (3, 3)),
+            DarknetConv2D_BN_Leaky(num_filters, (1, 1)))(x)
     y = compose(
-            DarknetConv2D_BN_Leaky(num_filters*2, (3,3)),
-            DarknetConv2D(out_filters, (1,1)))(x)
+            DarknetConv2D_BN_Leaky(num_filters * 2, (3, 3)),
+            DarknetConv2D(out_filters, (1, 1)))(x)
     return x, y
 
 
@@ -137,7 +143,7 @@ def yolo_head(feats, anchors, num_classes, input_shape, calc_loss=False):
     feats = K.reshape(
         feats, [-1, grid_shape[0], grid_shape[1], num_anchors, num_classes + 5])
 
-    # Adjust preditions to each spatial grid point and anchor size.
+    # Adjust predictions to each spatial grid point and anchor size.
     box_xy = (K.sigmoid(feats[..., :2]) + grid) / K.cast(grid_shape[::-1], K.dtype(feats))
     box_wh = K.exp(feats[..., 2:4]) * anchors_tensor / K.cast(input_shape[::-1], K.dtype(feats))
     box_confidence = K.sigmoid(feats[..., 4:5])
@@ -149,7 +155,7 @@ def yolo_head(feats, anchors, num_classes, input_shape, calc_loss=False):
 
 
 def yolo_correct_boxes(box_xy, box_wh, input_shape, image_shape):
-    '''Get corrected boxes'''
+    """Adjust boxes predicted on the letterboxed input back to the original image."""
     box_yx = box_xy[..., ::-1]
     box_hw = box_wh[..., ::-1]
     input_shape = K.cast(input_shape, K.dtype(box_yx))
@@ -175,7 +181,7 @@ def yolo_correct_boxes(box_xy, box_wh, input_shape, image_shape):
 
 
 def yolo_boxes_and_scores(feats, anchors, num_classes, input_shape, image_shape):
-    '''Process Conv layer output'''
+    """Decode one Conv layer output into boxes and per-class scores."""
     box_xy, box_wh, box_confidence, box_class_probs = yolo_head(feats,
         anchors, num_classes, input_shape)
     boxes = yolo_correct_boxes(box_xy, box_wh, input_shape, image_shape)
@@ -401,11 +407,7 @@ def yolo_loss(args, anchors, num_classes, ignore_thresh=.5, print_loss=False):
         ignore_mask = K.expand_dims(ignore_mask, -1)
 
         # K.binary_crossentropy is helpful to avoid exp overflow.
-
-        print(raw_true_xy)
-        print(raw_pred[...,0:2])
-
-        xy_loss = object_mask * box_loss_scale * K.binary_crossentropy(raw_true_xy, raw_pred[...,0:2], from_logits=True)
+        xy_loss = object_mask * box_loss_scale * K.binary_crossentropy(raw_true_xy, raw_pred[..., 0:2], from_logits=True)
         wh_loss = object_mask * box_loss_scale * 0.5 * K.square(raw_true_wh-raw_pred[...,2:4])
         confidence_loss = object_mask * K.binary_crossentropy(object_mask, raw_pred[...,4:5], from_logits=True)+ \
             (1-object_mask) * K.binary_crossentropy(object_mask, raw_pred[...,4:5], from_logits=True) * ignore_mask

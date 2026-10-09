@@ -1,59 +1,123 @@
-def extract_walking_frames(meanxs, offset):
-    '''
-    meanxs : the maximum index from the filtered means of subtracted frames 
-    offset : number of frames between each step 
-    local min and local max of meanxs are used to detect if a mouse is walking. 
-    Outputs : indexes where the mouse is walking 
-    '''
-    
-    b, a = signal.butter(5, 0.3)
-    y = signal.filtfilt(b, a, np.array(meanxs), padlen=10) # more filtering 
+"""Helpers for the walking-frame and paw-inference notebooks.
 
-    local_max_idx = argrelextrema(y, np.greater) 
+These functions are called from notebooks/localize-paw-inference.ipynb, which
+sets up three module-level globals before calling them:
+
+- ``yoloObj``: an initialized ``YOLO`` object (see scripts/yolo.py)
+- ``video_name``: name of the video being processed, used for pickle filenames
+- ``final_walking_frames``: frame filenames where the mouse is walking,
+  as returned by ``split_video_to_walking_only``
+"""
+
+import pickle
+import time
+
+import numpy as np
+import matplotlib.pylab as plt
+from IPython.display import clear_output
+from PIL import Image
+from scipy import signal
+from scipy.fft import fft
+from scipy.signal import argrelextrema
+
+
+def extract_walking_frames(meanxs, offset):
+    """Find frame intervals where the mouse is walking.
+
+    Local minima and maxima of the filtered motion signal are paired; pairs
+    closer than 10 frames apart are treated as walking. The global ``offset``
+    shifts the indices to the position of the current batch within the video.
+
+    Parameters
+    ----------
+    meanxs : list of int
+        Per-frame index of the strongest motion response.
+    offset : int
+        Frame index where the current batch starts in the full video.
+
+    Returns
+    -------
+    list of (int, int)
+        (start, end) frame intervals where the mouse is walking.
+    """
+    b, a = signal.butter(5, 0.3)
+    y = signal.filtfilt(b, a, np.array(meanxs), padlen=10)  # more filtering
+
+    local_max_idx = argrelextrema(y, np.greater)
     local_min_idx = argrelextrema(y, np.less)
 
     walking_frames = []
-    for imin,imax in zip(local_min_idx[0],local_max_idx[0]):
-        if abs(imax-imin)<10:
-            walking_frames.append((min(imax+offset,imin+offset),max(imax+offset,imin+offset)))
+    for imin, imax in zip(local_min_idx[0], local_max_idx[0]):
+        if abs(imax - imin) < 10:
+            walking_frames.append((min(imax + offset, imin + offset),
+                                   max(imax + offset, imin + offset)))
     return walking_frames
 
-def merge_frame_indicies(walking_frames,thr_merging,thr_save):
-    '''
-    walking_frames : output from extract_walking_frames contains walking frame indicies 
-    thr_merging  : Merges groups of walking frames together to compensate for mistakes from the heuristics
-    thr_save : Threshol for saving group of frames 
-    '''
-    results = []
-    count = 0 
-    tuples = np.concatenate((walking_frames))
 
+def merge_frame_indicies(walking_frames, thr_merging, thr_save):
+    """Merge nearby walking intervals and drop short ones.
+
+    Parameters
+    ----------
+    walking_frames : list of list of (int, int)
+        Walking intervals, one list per video batch.
+    thr_merging : int
+        Intervals separated by fewer frames than this are merged.
+    thr_save : int
+        Merged intervals shorter than this are discarded.
+
+    Returns
+    -------
+    list of [int, int]
+        Final [start, end] walking intervals.
+    """
+    results = []
+    tuples = np.concatenate(walking_frames)
+
+    so_far = None
     for tuple_min_max in tuples:
         x = tuple_min_max[0]
         y = tuple_min_max[1]
-        if count == 0:
-            so_far = [x,y]
-            count += 1
+        if so_far is None:
+            so_far = [x, y]
+        elif x - so_far[1] < thr_merging:
+            so_far[1] = y
         else:
-            if x - so_far[1] < thr_merging: 
-                so_far[1] = y
-            else:
-                if so_far[1] - so_far[0] > thr_save:
-                    results.append(so_far)
-                count = 0
+            if so_far[1] - so_far[0] > thr_save:
+                results.append(so_far)
+            so_far = [x, y]
+    # flush the last open interval
+    if so_far is not None and so_far[1] - so_far[0] > thr_save:
+        results.append(so_far)
     return results
 
-def split_video_to_walking_only(files_abs_path, disp = 0):
-    
-    # Figuring out the frames where the mouse is walking 
+
+def split_video_to_walking_only(files_abs_path, disp=0):
+    """Detect walking frames in a video and save the frame filenames to a pickle.
+
+    Frames are processed in batches of 400. Consecutive frames are subtracted
+    and the index of the strongest motion response is tracked over time; the
+    signal is filtered and local extrema are used to detect walking
+    (see ``extract_walking_frames``).
+
+    Parameters
+    ----------
+    files_abs_path : list of str
+        Absolute paths of the video frames, in order.
+    disp : int
+        When non-zero, show diagnostic plots while processing.
+
+    Returns
+    -------
+    list of str
+        Frame filenames (e.g. "1234.jpg") where the mouse is walking.
+    """
+    # Figuring out the frames where the mouse is walking
     offset = 400
 
     batch = []
-    images = []
-    dict_video = {}
 
-    # Looping over frames for each video to extract walking frames 
-
+    # Looping over frames for each video to extract walking frames
     walking_frames = []
 
     count = 0
@@ -61,151 +125,193 @@ def split_video_to_walking_only(files_abs_path, disp = 0):
     for frame_path in files_abs_path:
 
         try:
-            # Read each image and averaging over all channels 
+            # Read each image and average over all channels
             image_data = plt.imread(frame_path)
-            image_data = np.int32(np.mean(image_data,axis = -1 ))
+            image_data = np.int32(np.mean(image_data, axis=-1))
             batch.append(image_data)
-        except:
-            x = 1 
+        except Exception:
+            pass
 
-        print(len(batch),end='\r')
+        print(len(batch), end='\r')
 
-        if len(batch) >= offset:  
+        if len(batch) >= offset:
 
-            o1 = offset * count # keeping track of where we are in the frames 
-            count += 1 
-            meanxs = [] 
+            o1 = offset * count  # keeping track of where we are in the frames
+            count += 1
+            meanxs = []
             kk = 1
             count_index = 0
-            batch_arr = np.array(batch).squeeze() # batch of frames 
-            diff_batch = batch_arr[0:-1,:,:] - batch_arr[1:,:,:] # subtracting the frames 
+            batch_arr = np.array(batch).squeeze()  # batch of frames
+            diff_batch = batch_arr[0:-1, :, :] - batch_arr[1:, :, :]  # subtracting the frames
 
             for xx in diff_batch:
-                count_index += 1 
-                mean_x = np.mean(xx[:,0:600]>0,axis=0) # avergaing over pixels (removing the treadmill)
-                b, a = signal.butter(8, 0.025) # filter for smoothing mean
+                count_index += 1
+                mean_x = np.mean(xx[:, 0:600] > 0, axis=0)  # averaging over pixels (removing the treadmill)
+                b, a = signal.butter(8, 0.025)  # filter for smoothing mean
                 y = signal.filtfilt(b, a, np.array(mean_x), padlen=150)
-                meanxs.append(np.argmax(y)) # finding the max index of filtered version of mean signals 
+                meanxs.append(np.argmax(y))  # finding the max index of filtered version of mean signals
                 if disp:
-                    # Display 
-                    figure, ax = plt.subplots(2,2,figsize=(20,10))
-                    
-                    ax[0][0].imshow(xx>0)
+                    # Display
+                    figure, ax = plt.subplots(2, 2, figsize=(20, 10))
+
+                    ax[0][0].imshow(xx > 0)
                     ax[0][0].set_title(" mouse activity ")
                     ax[0][1].imshow(batch_arr[count_index])
                     ax[0][1].set_title(" frame ")
 
-                    ax[1][0].plot(np.arange(kk),np.array(meanxs))
+                    ax[1][0].plot(np.arange(kk), np.array(meanxs))
                     ax[1][0].set_title(" walking signal over time ")
                     ax[1][1].plot(y)
                     ax[1][1].set_title(" frame walking signal smoothed ")
 
-                    kk += 1 
+                    kk += 1
                     plt.show()
-                    time.sleep(0.001) 
+                    time.sleep(0.001)
                     clear_output(wait=True)
 
-            # extracting Walking frames 
-            walking_frames.append(extract_walking_frames(meanxs,o1))
+            # extracting Walking frames
+            walking_frames.append(extract_walking_frames(meanxs, o1))
             batch = []
 
     # collect all frames, concatenate, merge...
     thr_merging = 30
     thr_save = 50
     final_walking_frames = []
-    walking_frame_intervals = merge_frame_indicies(walking_frames,thr_merging,thr_save)
+    walking_frame_intervals = merge_frame_indicies(walking_frames, thr_merging, thr_save)
     for frame in walking_frame_intervals:
-        for i in range(frame[0],frame[1]):
+        for i in range(frame[0], frame[1]):
             final_walking_frames.append(str(i) + '.jpg')
 
-    pickle.dump(final_walking_frames , open('walking_frames_all_videos' +video_name + '.pickle','wb'))        
+    pickle.dump(final_walking_frames,
+                open('walking_frames_all_videos' + video_name + '.pickle', 'wb'))
 
-    print("Ratio of walking frames over not walking " + str(len(final_walking_frames)/len(files_abs_path)))
+    print("Ratio of walking frames over not walking " + str(len(final_walking_frames) / len(files_abs_path)))
     return final_walking_frames
 
-def paw_detection_video(files_abs_path, disp):
-    # Performing inference and plotting it on top each frame 
-    count = 0 
+
+def paw_detection_video(files_abs_path, disp=0):
+    """Run the fine-tuned YOLO model on walking frames and collect paw centers.
+
+    Relies on the notebook globals ``yoloObj`` (initialized YOLO object),
+    ``final_walking_frames`` (walking frame filenames) and ``video_name``
+    (used for the output pickle filename).
+
+    Parameters
+    ----------
+    files_abs_path : list of str
+        Absolute paths of the video frames, in order.
+    disp : int
+        When non-zero, show each annotated frame while processing.
+
+    Returns
+    -------
+    dict
+        Maps each paw label ('front right', 'front left', 'back right',
+        'back left') to a (2, N) array of (center_x, center_y) detections.
+    """
+    # Performing inference and plotting it on top of each frame
+    count = 0
     dict_paws = {}
 
     for f in files_abs_path:
         image_name = f.split('/')[-1]
-        if image_name in final_walking_frames: # performing inference only when the mice is walking
+        if image_name in final_walking_frames:  # performing inference only when the mouse is walking
             image = Image.open(f)
             image_data = np.array(image)
-            image_ = Image.fromarray(image_data.astype('uint8'), 'RGB')
-            image,locations, labels = yoloObj.detect_image(image_)
+            image_ = Image.fromarray(image_data.astype('uint8')).convert('RGB')
+            image, locations, labels = yoloObj.detect_image(image_)
             if disp:
-                figure, ax = plt.subplots(1,1,figsize=(40,20))
+                figure, ax = plt.subplots(1, 1, figsize=(40, 20))
                 ax.imshow(image)
                 plt.show()
                 time.sleep(0.1)
                 clear_output(wait=True)
             count += 1
             if not disp:
-                print(round(count/len(final_walking_frames),3), end='\r')
-            for location,label_ in zip(locations,labels):
+                print(round(count / len(final_walking_frames), 3), end='\r')
+            for location, label_ in zip(locations, labels):
                 ymin = location[0]
                 xmin = location[1]
                 ymax = location[2]
                 xmax = location[3]
-                centery = (ymin+ymax)/2
-                centerx = (xmin+xmax)/2
+                centery = (ymin + ymax) / 2
+                centerx = (xmin + xmax) / 2
                 label = ' '.join(label_.split()[0:2])
-                array_ = np.zeros((2,count+1))
-                array_[0][count] =  centerx 
-                array_[1][count] =  centery
+                array_ = np.zeros((2, count + 1))
+                array_[0][count] = centerx
+                array_[1][count] = centery
                 if label not in dict_paws.keys():
                     dict_paws[label] = array_
                 else:
                     existing_array = dict_paws[label]
-                    array_[0][:len(existing_array.T)] +=  existing_array[0]
-                    array_[1][:len(existing_array.T)] +=  existing_array[1]
+                    array_[0][:len(existing_array.T)] += existing_array[0]
+                    array_[1][:len(existing_array.T)] += existing_array[1]
                     dict_paws[label] = array_
 
-    pickle.dump(dict_paws,open(video_name + 'dict_paws.pickle','wb'))
+    pickle.dump(dict_paws, open(video_name + 'dict_paws.pickle', 'wb'))
     return dict_paws
 
-def cal_num_steps(X,Y, window = 100):
-    '''
-    finding the number of steps
-    '''
-    w = [0,window]
+
+def cal_num_steps(X, Y, window=100):
+    """Yield the dominant stride count per sliding window of paw motion.
+
+    The X+Y paw-center signal is Butterworth-filtered in each window and the
+    dominant frequency bin of its FFT (excluding DC) is taken as the number
+    of steps in that window.
+
+    Parameters
+    ----------
+    X, Y : array-like
+        Paw center coordinates over frames.
+    window : int
+        Window length in frames; windows advance by half a window.
+    """
+    w = [0, window]
     b, a = signal.butter(5, 0.1)
     while w[1] < len(X):
-        XY   = (X+Y)[w[0]:w[1]]
-        XY = signal.filtfilt(b, a, np.array(XY), padlen=10) 
+        XY = (X + Y)[w[0]:w[1]]
+        XY = signal.filtfilt(b, a, np.array(XY), padlen=10)
         fft_br = np.abs(fft(XY))
-        num_steps = np.argmax(fft_br[1:int(len(fft_br)/2)])
-        w[0] += int(window/2)
-        w[1] += int(window/2)
+        num_steps = np.argmax(fft_br[1:int(len(fft_br) / 2)])
+        w[0] += int(window / 2)
+        w[1] += int(window / 2)
         yield num_steps
-        
-def step_analytics_video(dict_paws, wn = 200):
-    x   = dict_paws['back right']
+
+
+def step_analytics_video(dict_paws, wn=200):
+    """Plot step counts, mean paw positions, and polar stride plots per paw.
+
+    Parameters
+    ----------
+    dict_paws : dict
+        Output of ``paw_detection_video``: paw label to (2, N) center array.
+    wn : int
+        Window length in frames for the rolling statistics (50% overlap).
+    """
+    x = dict_paws['back right']
     Xbr = x[0]
     Ybr = x[1]
-    x   = dict_paws['back left']
+    x = dict_paws['back left']
     Xbl = x[0]
     Ybl = x[1]
-    x   = dict_paws['front right']
+    x = dict_paws['front right']
     Xfr = x[0]
     Yfr = x[1]
-    x   = dict_paws['front left']
+    x = dict_paws['front left']
     Xfl = x[0]
     Yfl = x[1]
 
-    genfr = cal_num_steps(Xfr,Yfr, window = wn)
-    genbr = cal_num_steps(Xbr,Ybr, window = wn)
-    genfl = cal_num_steps(Xfl,Yfl, window = wn)
-    genbl = cal_num_steps(Xbl,Ybl, window = wn)
+    genfr = cal_num_steps(Xfr, Yfr, window=wn)
+    genbr = cal_num_steps(Xbr, Ybr, window=wn)
+    genfl = cal_num_steps(Xfl, Yfl, window=wn)
+    genbl = cal_num_steps(Xbl, Ybl, window=wn)
 
     num_steps_fr = []
     num_steps_br = []
     num_steps_bl = []
     num_steps_fl = []
     # Front Right
-    while True: 
+    while True:
         try:
             num_steps_fr.append(next(genfr))
         except StopIteration:
@@ -229,43 +335,42 @@ def step_analytics_video(dict_paws, wn = 200):
         except StopIteration:
             break
 
+    figure, ax = plt.subplots(2, 2, figsize=(20, 10))
 
-    figure, ax = plt.subplots(2,2,figsize=(20,10))
-
-    thr = 2 # minimum number of steps to accept (ideally this is 1, but the model makes mistakes)
-    nfr = np.array(num_steps_fr) >= thr 
-    scoreFR = np.sum(nfr)/len(nfr)
+    thr = 2  # minimum number of steps to accept (ideally this is 1, but the model makes mistakes)
+    nfr = np.array(num_steps_fr) >= thr
+    scoreFR = np.sum(nfr) / len(nfr)
     print("Avg Number of steps over " + str(wn) + " with 50% overlap")
     ax[0][0].plot(num_steps_fr)
     ax[0][0].set_title('FR score ' + str(scoreFR))
 
-    nbr = np.array(num_steps_br) >= thr 
-    scoreBR = np.sum(nbr)/len(nfr)
+    nbr = np.array(num_steps_br) >= thr
+    scoreBR = np.sum(nbr) / len(nfr)
     ax[0][1].plot(num_steps_br)
     ax[0][1].set_title("BR score " + str(scoreBR))
 
-    nbl = np.array(num_steps_bl) >= thr 
-    scoreBL = np.sum(nbl)/len(nbl)
+    nbl = np.array(num_steps_bl) >= thr
+    scoreBL = np.sum(nbl) / len(nbl)
     ax[1][0].plot(num_steps_bl)
-    ax[1][0].set_title("BL score " +  str(scoreBL))
+    ax[1][0].set_title("BL score " + str(scoreBL))
 
-    nfl = np.array(num_steps_fl) >= thr 
-    scoreFL = np.sum(nfl)/len(nfl)
+    nfl = np.array(num_steps_fl) >= thr
+    scoreFL = np.sum(nfl) / len(nfl)
     ax[1][1].plot(num_steps_fl)
-    ax[1][1].set_title("FL score " +  str(scoreFL))
-    
-    print("Total Average Score : " + str(np.sum(scoreFL+scoreFR+scoreBL+scoreBR)/4))
+    ax[1][1].set_title("FL score " + str(scoreFL))
+
+    print("Total Average Score : " + str(np.sum(scoreFL + scoreFR + scoreBL + scoreBR) / 4))
     plt.show()
 
-    figure, ax = plt.subplots(2,2,figsize=(20,10))
-    paw_names = ['front right', 'front left', 'back left','back right']
-    indexes = [(0,0),(0,1),(1,0),(1,1)]
+    figure, ax = plt.subplots(2, 2, figsize=(20, 10))
+    paw_names = ['front right', 'front left', 'back left', 'back right']
+    indexes = [(0, 0), (0, 1), (1, 0), (1, 1)]
     print(' Average change in axis over a ' + str(wn) + ' frames with 50% overlap')
-    for paw_name,index in zip(paw_names,indexes):
+    for paw_name, index in zip(paw_names, indexes):
         x = dict_paws[paw_name][0]
-        x[x == 0] += 100#np.mean(x)
+        x[x == 0] += 100  # np.mean(x)
         y = dict_paws[paw_name][1]
-        y[y == 0] += 100#np.mean(y)
+        y[y == 0] += 100  # np.mean(y)
         b = [0, wn]
         xmu_list = []
         ymu_list = []
@@ -275,69 +380,67 @@ def step_analytics_video(dict_paws, wn = 200):
             y_mean = np.mean(y[b[0]:b[1]])
             xmu_list.append(x_mean)
             ymu_list.append(y_mean)
-            b[0] += int(wn/2)
-            b[1] += int(wn/2)
+            b[0] += int(wn / 2)
+            b[1] += int(wn / 2)
         ax[index[0]][index[1]].plot(xmu_list)
         ax[index[0]][index[1]].plot(ymu_list)
-        ax[index[0]][index[1]].legend(['x','y'])
-        ax[index[0]][index[1]].set_title(paw_name + " std x " +  str(round(np.std(xmu_list),2)) + " std y " + str(round(np.std(ymu_list),2)))
+        ax[index[0]][index[1]].legend(['x', 'y'])
+        ax[index[0]][index[1]].set_title(paw_name + " std x " + str(round(np.std(xmu_list), 2)) +
+                                        " std y " + str(round(np.std(ymu_list), 2)))
 
     plt.show()
-    
-    paw_names = ['front right', 'front left', 'back left','back right']
-    indexes = [(0,0),(0,1),(1,0),(1,1)]
+
+    paw_names = ['front right', 'front left', 'back left', 'back right']
+    indexes = [(0, 0), (0, 1), (1, 0), (1, 1)]
     print(' Polar plots per each frame where a paw was detected')
-    figure, ax = plt.subplots(2,2,figsize=(15,15),subplot_kw={'projection': 'polar'})
-    for paw_name,index in zip(paw_names,indexes):
+    figure, ax = plt.subplots(2, 2, figsize=(15, 15), subplot_kw={'projection': 'polar'})
+    for paw_name, index in zip(paw_names, indexes):
         x = dict_paws[paw_name][0]
         y = dict_paws[paw_name][1]
         x = x[x != 0]
         y = y[y != 0]
 
-        r_mean = np.sqrt(np.power(x,2)+np.power(y,2))
-        theta_mean = np.arctan(y/x)
+        r_mean = np.sqrt(np.power(x, 2) + np.power(y, 2))
+        theta_mean = np.arctan(y / x)
 
-        ax[index[0]][index[1]].plot(theta_mean,r_mean,'x')
+        ax[index[0]][index[1]].plot(theta_mean, r_mean, 'x')
         ax[index[0]][index[1]].grid(True)
         ax[index[0]][index[1]].set_title(paw_name)
     plt.show()
-    
-    
-    
-    
+
     x = dict_paws['front right'][0]
     y = dict_paws['front right'][1]
-    r_meanFR = np.sqrt(np.power(x,2)+np.power(y,2))
-    theta_meanFR = np.arctan(y/(x+0.000001))
-    
+    r_meanFR = np.sqrt(np.power(x, 2) + np.power(y, 2))
+    theta_meanFR = np.arctan(y / (x + 0.000001))
+
     x = dict_paws['front left'][0]
     y = dict_paws['front left'][1]
-    r_meanFL = np.sqrt(np.power(x,2)+np.power(y,2))
-    theta_meanFL = np.arctan(y/(x+0.000001))
-    
+    r_meanFL = np.sqrt(np.power(x, 2) + np.power(y, 2))
+    theta_meanFL = np.arctan(y / (x + 0.000001))
+
     x = dict_paws['back right'][0]
     y = dict_paws['back right'][1]
-    r_meanBR = np.sqrt(np.power(x,2)+np.power(y,2))
-    theta_meanBR = np.arctan(y/(x+0.000001))
-    
+    r_meanBR = np.sqrt(np.power(x, 2) + np.power(y, 2))
+    theta_meanBR = np.arctan(y / (x + 0.000001))
+
     x = dict_paws['back left'][0]
     y = dict_paws['back left'][1]
-    r_meanBL = np.sqrt(np.power(x,2)+np.power(y,2))
-    theta_meanBL = np.arctan(y/(x+0.000001))
-    
-    figure, ax = plt.subplots(1,1,figsize=(15,15))
-    ax.plot(theta_meanFR+4)
-    ax.plot(theta_meanFL+2)
+    r_meanBL = np.sqrt(np.power(x, 2) + np.power(y, 2))
+    theta_meanBL = np.arctan(y / (x + 0.000001))
+
+    figure, ax = plt.subplots(1, 1, figsize=(15, 15))
+    ax.plot(theta_meanFR + 4)
+    ax.plot(theta_meanFL + 2)
     ax.plot(theta_meanBR)
-    ax.plot(theta_meanBL-2)
-    ax.legend(['FR','FL','BR','BL'])
+    ax.plot(theta_meanBL - 2)
+    ax.legend(['FR', 'FL', 'BR', 'BL'])
     ax.set_title("Paw angles between -Pi to Pi for each frame - 0 if not detected")
     plt.show()
-    figure, ax = plt.subplots(1,1,figsize=(15,15))
-    ax.plot(r_meanFR+600)
-    ax.plot(r_meanFL+300)
+    figure, ax = plt.subplots(1, 1, figsize=(15, 15))
+    ax.plot(r_meanFR + 600)
+    ax.plot(r_meanFL + 300)
     ax.plot(r_meanBR)
-    ax.plot(r_meanBL-300)
-    ax.legend(['FR','FL','BR','BL'])
+    ax.plot(r_meanBL - 300)
+    ax.legend(['FR', 'FL', 'BR', 'BL'])
     ax.set_title("Radius")
     plt.show()

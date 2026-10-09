@@ -7,6 +7,29 @@ As shown in some of the snapshots below, the camera quality is not great. The tr
 
 As with most machine learning tools data, "good data", is required. To overcome the lack of labeled data, I used image processing tools to create several heuristics on some of the videos (and from those videos only a selected set of frames) that would accurately extract the mouse paws for me.
 
+## Repository structure
+
+- `notebooks/mouse-moving.ipynb` - generates the training data: extracts walking-only frames from raw treadmill videos and labels paws with image-processing heuristics. Writes YOLO-format annotations (`train.txt`).
+- `notebooks/MOWO.ipynb` - fine-tunes YOLOv3 on the generated annotations (bottleneck stage, then full fine-tuning).
+- `notebooks/localize-paw-inference.ipynb` - runs the full inference pipeline on one video: walking-frame detection, paw localization with the fine-tuned model, and step-count analytics per paw.
+- `scripts/model.py` - YOLOv3 model definition in Keras (adapted from https://github.com/qqwweee/keras-yolo3).
+- `scripts/yolo.py` - YOLO inference wrapper: detection on images and video.
+- `scripts/utils.py` - image preprocessing and data-augmentation helpers.
+- `scripts/inference_utils.py` - walking-frame detection, paw detection, and step analytics used by the inference notebook.
+- `input/` - data artifacts needed to run the notebooks (model weights, anchors, classes, frame lists). Large artifacts live here: https://www.kaggle.com/raminanush/datasets
+- `pictures and videos/` - figures and demo videos referenced below.
+
+## Requirements
+
+Install with `pip install -r requirements.txt`. The YOLO model code needs TensorFlow 2 with Keras and runs in TF1-style graph mode (eager execution is disabled in `scripts/yolo.py`).
+
+## How to run
+
+1. Download the data artifacts into `input/` (see `input/readme.md` and the Kaggle link above).
+2. Run `notebooks/mouse-moving.ipynb` to generate `train.txt` annotations from raw treadmill videos.
+3. Run `notebooks/MOWO.ipynb` to fine-tune YOLOv3 (set `training_stage` to start from bottlenecks, stage 0, or full fine-tuning).
+4. Run `notebooks/localize-paw-inference.ipynb` to detect paws in a new video and compute per-paw step analytics.
+
 You can find the notebook here: notebooks/mouse-moving.ipynb  
 
 See Youtube Video Below:
@@ -87,4 +110,4 @@ Angles
 Radius
 ![alt text](pictures%20and%20videos/radius.png)
 
-That's pretty much it. A lot of these analytics is just something I tried to derive to see how a mouse is doing on a treadmill, but you may very well wants to use the location of the paws to come up with your own statistic. If you have any questions or want to discuss other features feel free to drop me a line at ramin.audio@gmail.com
+That's pretty much it. A lot of these analytics is just something I tried to derive to see how a mouse is doing on a treadmill, but you may very well want to use the location of the paws to come up with your own statistic. If you have any questions or want to discuss other features feel free to drop me a line at ramin.audio@gmail.com
